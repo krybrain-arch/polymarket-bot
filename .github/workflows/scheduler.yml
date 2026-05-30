@@ -2,8 +2,14 @@ name: Polymarket Scanner
 
 on:
   schedule:
-    - cron: '0 * * * *'   # Jalan tiap jam (UTC)
-  workflow_dispatch:        # Bisa juga dijalankan manual
+    - cron: '0 * * * *'   # Jalan otomatis setiap jam
+  workflow_dispatch:        # Bisa juga dijalankan manual dari tab Actions
+
+# ─────────────────────────────────────────────────────
+# FIX: Paksa Node.js 24 agar tidak error setelah 16 Juni 2026
+# ─────────────────────────────────────────────────────
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   scan:
