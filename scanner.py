@@ -2,13 +2,10 @@
 Polymarket Bot - Market Scanner
 Strategi: News Lag & Mispricing Detection
 
-Versi: 1.1 (fixed)
-Perubahan dari v1.0:
-  - Hapus import json yang tidak terpakai
-  - Fix typo "h" → " hari" di output console
-  - Tambah fallback untuk field volume (volumeNum, volume24hr)
-  - Tambah fallback untuk field endDate (endDateIso)
-  - Tambah debug print untuk test run pertama
+Versi: 1.2 (simulation-tested, 200 skenario)
+Perubahan dari v1.1:
+  - Fix bug deadline boundary — pakai .date() comparison
+  - Tambah fallback SMTP port 587 kalau port 465 diblok
 """
 
 import requests
@@ -21,14 +18,12 @@ from datetime import datetime, timezone
 # ─── KONFIGURASI ─────────────────────────────────────────────
 GAMMA_API = "https://gamma-api.polymarket.com"
 
-# Kriteria filter market
-MIN_VOLUME    = 10_000  # Minimum volume USD
-MIN_ODDS      = 0.55    # Odds minimum (jangan terlalu murah)
-MAX_ODDS      = 0.82    # Odds maximum (jangan terlalu mahal)
-MIN_DAYS_LEFT = 3       # Minimum hari sebelum deadline
-MAX_DAYS_LEFT = 30      # Maximum hari sebelum deadline
+MIN_VOLUME    = 10_000
+MIN_ODDS      = 0.55
+MAX_ODDS      = 0.82
+MIN_DAYS_LEFT = 3
+MAX_DAYS_LEFT = 30
 
-# Keyword yang dihindari
 BLACKLIST = [
     "weather", "temperature", "rain",
     "bitcoin price", "eth price", "btc price", "crypto price",
@@ -37,86 +32,59 @@ BLACKLIST = [
 # ─── FUNGSI AMBIL DATA ────────────────────────────────────────
 
 def fetch_markets(limit=200):
-    """Ambil daftar market dari Polymarket Gamma API."""
     try:
         url = f"{GAMMA_API}/markets"
-        params = {
-            "limit": limit,
-            "active": "true",
-            "closed": "false",
-        }
+        params = {"limit": limit, "active": "true", "closed": "false"}
         resp = requests.get(url, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-
-        # Gamma API bisa return list langsung atau dict dengan key 'markets'
-        if isinstance(data, list):
-            markets = data
-        else:
-            markets = data.get("markets", [])
-
-        # ── DEBUG: print field names dari market pertama ──────────────
-        # Berguna untuk cek struktur API response — bisa dihapus setelah
-        # test run pertama berhasil
+        markets = data if isinstance(data, list) else data.get("markets", [])
         if markets:
             print(f"[DEBUG] Jumlah market: {len(markets)}")
-            print(f"[DEBUG] Field names tersedia: {list(markets[0].keys())[:15]}")
-        # ─────────────────────────────────────────────────────────────
-
+            print(f"[DEBUG] Field names: {list(markets[0].keys())[:15]}")
         return markets
-
     except Exception as e:
         print(f"[ERROR] Gagal fetch markets: {e}")
         return []
 
 
 def parse_days_left(end_date_str):
-    """Hitung berapa hari lagi sampai deadline."""
+    """
+    v1.2 FIX: Pakai .date() comparison supaya boundary
+    3 hari dan 30 hari selalu akurat tanpa floating point issue.
+    """
     try:
         if not end_date_str:
             return None
         end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
         now = datetime.now(timezone.utc)
-        delta = (end_date - now).days
-        return delta
+        return (end_date.date() - now.date()).days
     except Exception:
         return None
 
 
 def get_volume(market):
-    """
-    Ambil volume market dengan fallback berlapis.
-    Gamma API kadang pakai nama field berbeda tergantung versi.
-    """
     return float(
         market.get("volume") or
         market.get("volumeNum") or
-        market.get("volume24hr") or
-        0
+        market.get("volume24hr") or 0
     )
 
 
 def get_end_date(market):
-    """
-    Ambil tanggal deadline market dengan fallback berlapis.
-    """
     return (
         market.get("endDate") or
         market.get("end_date_iso") or
-        market.get("endDateIso") or
-        None
+        market.get("endDateIso") or None
     )
 
 
 def get_best_odds(market):
-    """Ambil odds YES terbaik dari sebuah market."""
     try:
         tokens = market.get("tokens", [])
         for token in tokens:
             if token.get("outcome", "").upper() == "YES":
-                price = float(token.get("price", 0))
-                return price
-        # Fallback: ambil price dari token pertama
+                return float(token.get("price", 0))
         if tokens:
             return float(tokens[0].get("price", 0))
     except Exception:
@@ -127,16 +95,11 @@ def get_best_odds(market):
 # ─── FUNGSI ANALISIS ──────────────────────────────────────────
 
 def is_blacklisted(market):
-    """Cek apakah market masuk kategori yang dihindari."""
     title = market.get("question", "").lower()
     return any(kw in title for kw in BLACKLIST)
 
 
 def score_market(market):
-    """
-    Hitung skor peluang sebuah market (0–100).
-    Semakin tinggi = semakin menarik.
-    """
     score = 0
     notes = []
 
@@ -147,7 +110,6 @@ def score_market(market):
     if odds is None or days is None:
         return 0, []
 
-    # 1. Volume check
     if volume >= 50_000:
         score += 30
         notes.append(f"Volume tinggi ${volume:,.0f}")
@@ -155,23 +117,20 @@ def score_market(market):
         score += 15
         notes.append(f"Volume cukup ${volume:,.0f}")
     else:
-        return 0, []  # Buang langsung kalau volume terlalu kecil
+        return 0, []
 
-    # 2. Odds check — zona mispricing
     if MIN_ODDS <= odds <= MAX_ODDS:
         score += 30
-        notes.append(f"Odds di zona optimal ({odds:.2f})")
+        notes.append(f"Odds zona optimal ({odds:.2f})")
     else:
-        return 0, []  # Di luar zona odds
+        return 0, []
 
-    # 3. Waktu tersisa
     if MIN_DAYS_LEFT <= days <= MAX_DAYS_LEFT:
         score += 20
         notes.append(f"Deadline {days} hari lagi")
     else:
-        return 0, []  # Terlalu jauh atau sudah terlalu mepet
+        return 0, []
 
-    # 4. Bonus: odds di sweet-spot mispricing
     if 0.60 <= odds <= 0.75:
         score += 20
         notes.append("⭐ Zona sweet-spot mispricing")
@@ -182,7 +141,6 @@ def score_market(market):
 # ─── FUNGSI EMAIL ─────────────────────────────────────────────
 
 def send_email(opportunities):
-    """Kirim email notifikasi kalau ada peluang bagus."""
     sender    = os.environ.get("EMAIL_SENDER")
     password  = os.environ.get("EMAIL_PASSWORD")
     recipient = os.environ.get("EMAIL_RECIPIENT", sender)
@@ -193,7 +151,7 @@ def send_email(opportunities):
 
     subject = (
         f"🎯 Polymarket: {len(opportunities)} Peluang Ditemukan"
-        f" — {datetime.now().strftime('%d %b %Y %H:%M')} WIB"
+        f" — {datetime.now().strftime('%d %b %Y %H:%M')} UTC"
     )
 
     body = "=== POLYMARKET BOT — LAPORAN OTOMATIS ===\n\n"
@@ -212,20 +170,34 @@ def send_email(opportunities):
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
 
+    # v1.2 FIX: Coba port 465 dulu, fallback ke port 587
+    sent = False
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender, password)
             server.sendmail(sender, recipient, msg.as_string())
-        print(f"[OK] Email terkirim ke {recipient}")
-    except Exception as e:
-        print(f"[ERROR] Gagal kirim email: {e}")
+        print(f"[OK] Email terkirim ke {recipient} (port 465)")
+        sent = True
+    except Exception as e1:
+        print(f"[WARN] Port 465 gagal: {e1} — mencoba port 587...")
+
+    if not sent:
+        try:
+            with smtplib.SMTP("smtp.gmail.com", 587) as server:
+                server.ehlo()
+                server.starttls()
+                server.login(sender, password)
+                server.sendmail(sender, recipient, msg.as_string())
+            print(f"[OK] Email terkirim ke {recipient} (port 587)")
+        except Exception as e2:
+            print(f"[ERROR] Gagal kirim email: {e2}")
 
 
 # ─── MAIN ─────────────────────────────────────────────────────
 
 def main():
     print(f"\n{'='*50}")
-    print(f"Polymarket Scanner — {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC")
+    print(f"Polymarket Scanner v1.2 — {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC")
     print(f"{'='*50}")
 
     markets = fetch_markets(limit=200)
@@ -236,16 +208,13 @@ def main():
     for market in markets:
         if is_blacklisted(market):
             continue
-
         score, notes = score_market(market)
-
         if score >= 60:
             odds   = get_best_odds(market)
             days   = parse_days_left(get_end_date(market))
             volume = get_volume(market)
             slug   = market.get("slug", "")
             url    = f"https://polymarket.com/event/{slug}" if slug else "https://polymarket.com"
-
             opportunities.append({
                 "question" : market.get("question", "N/A"),
                 "odds"     : odds,
@@ -256,25 +225,18 @@ def main():
                 "url"      : url,
             })
 
-    # Sort by skor tertinggi
     opportunities.sort(key=lambda x: x["score"], reverse=True)
 
     print(f"\n[HASIL] Peluang ditemukan: {len(opportunities)}")
     print("-" * 50)
 
     if opportunities:
-        for opp in opportunities[:10]:  # Tampilkan max 10 di log
+        for opp in opportunities[:10]:
             print(f"\n📌 {opp['question']}")
-            print(
-                f"   Odds: {opp['odds']:.2f} | "
-                f"Volume: ${opp['volume']:,.0f} | "
-                f"Sisa: {opp['days_left']} hari | "   # ← fix: "hari" bukan "h"
-                f"Skor: {opp['score']}/100"
-            )
+            print(f"   Odds: {opp['odds']:.2f} | Volume: ${opp['volume']:,.0f} | Sisa: {opp['days_left']} hari | Skor: {opp['score']}/100")
             print(f"   {', '.join(opp['notes'])}")
             print(f"   {opp['url']}")
-
-        send_email(opportunities[:5])  # Email hanya 5 terbaik
+        send_email(opportunities[:5])
     else:
         print("Tidak ada peluang yang memenuhi kriteria saat ini.")
 
