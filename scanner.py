@@ -2,10 +2,11 @@
 Polymarket Bot - Market Scanner
 Strategi: News Lag & Mispricing Detection
 
-Versi: 1.2 (simulation-tested, 200 skenario)
-Perubahan dari v1.1:
-  - Fix bug deadline boundary — pakai .date() comparison
-  - Tambah fallback SMTP port 587 kalau port 465 diblok
+Versi: 1.3
+Perubahan dari v1.2:
+  - Fix get_best_odds(): tambah support format outcomePrices/outcomes
+    (Gamma API pakai format ini, bukan 'tokens')
+  - Fix get_volume(): tambah fallback ke 'liquidityNum' dan 'liquidity'
 """
 
 import requests
@@ -49,10 +50,6 @@ def fetch_markets(limit=200):
 
 
 def parse_days_left(end_date_str):
-    """
-    v1.2 FIX: Pakai .date() comparison supaya boundary
-    3 hari dan 30 hari selalu akurat tanpa floating point issue.
-    """
     try:
         if not end_date_str:
             return None
@@ -64,10 +61,17 @@ def parse_days_left(end_date_str):
 
 
 def get_volume(market):
+    """
+    v1.3: Tambah fallback ke 'liquidity' dan 'liquidityNum'
+    karena Gamma API kadang tidak mengisi field 'volume'.
+    """
     return float(
         market.get("volume") or
         market.get("volumeNum") or
-        market.get("volume24hr") or 0
+        market.get("volume24hr") or
+        market.get("liquidity") or
+        market.get("liquidityNum") or
+        0
     )
 
 
@@ -80,13 +84,44 @@ def get_end_date(market):
 
 
 def get_best_odds(market):
+    """
+    v1.3 FIX: Support dua format API Polymarket:
+    - Format lama: tokens[{outcome, price}]
+    - Format baru (Gamma API): outcomes[] + outcomePrices[]
+    """
     try:
+        # Format baru: outcomes + outcomePrices (yang dipakai Gamma API)
+        outcomes = market.get("outcomes")
+        prices   = market.get("outcomePrices")
+
+        if outcomes and prices:
+            # outcomes bisa berupa string JSON atau list
+            if isinstance(outcomes, str):
+                import json
+                outcomes = json.loads(outcomes)
+            if isinstance(prices, str):
+                import json
+                prices = json.loads(prices)
+
+            for i, outcome in enumerate(outcomes):
+                if str(outcome).upper() == "YES" and i < len(prices):
+                    p = float(prices[i])
+                    if p > 0:
+                        return p
+            # Fallback: harga pertama
+            if prices:
+                p = float(prices[0])
+                if p > 0:
+                    return p
+
+        # Format lama: tokens array
         tokens = market.get("tokens", [])
-        for token in tokens:
-            if token.get("outcome", "").upper() == "YES":
-                return float(token.get("price", 0))
         if tokens:
+            for token in tokens:
+                if token.get("outcome", "").upper() == "YES":
+                    return float(token.get("price", 0))
             return float(tokens[0].get("price", 0))
+
     except Exception:
         pass
     return None
@@ -170,7 +205,6 @@ def send_email(opportunities):
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
 
-    # v1.2 FIX: Coba port 465 dulu, fallback ke port 587
     sent = False
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
@@ -197,7 +231,7 @@ def send_email(opportunities):
 
 def main():
     print(f"\n{'='*50}")
-    print(f"Polymarket Scanner v1.2 — {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC")
+    print(f"Polymarket Scanner v1.3 — {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC")
     print(f"{'='*50}")
 
     markets = fetch_markets(limit=200)
